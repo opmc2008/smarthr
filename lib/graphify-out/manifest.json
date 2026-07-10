@@ -1,0 +1,142 @@
+{
+  "main.dart": {
+    "mtime": 1783361425.7858117,
+    "ast_hash": "0eccc66cd7c4217e56e4f54c3443edee",
+    "semantic_hash": "0eccc66cd7c4217e56e4f54c3443edee"
+  },
+  "screens/attendance_screen.dart": {
+    "mtime": 1783361706.6047778,
+    "ast_hash": "7104b7be0b2c7d3321ed30fb89cb8ff9",
+    "semantic_hash": "7104b7be0b2c7d3321ed30fb89cb8ff9"
+  },
+  "screens/change_password_screen.dart": {
+    "mtime": 1783362098.2151885,
+    "ast_hash": "a2910d41ff736ba980215bc784da887d",
+    "semantic_hash": "a2910d41ff736ba980215bc784da887d"
+  },
+  "screens/dashboard_screen.dart": {
+    "mtime": 1783362915.4503837,
+    "ast_hash": "c3bf9b837d57d3fe4f41b1f3e1ad5621",
+    "semantic_hash": "c3bf9b837d57d3fe4f41b1f3e1ad5621"
+  },
+  "screens/holidays_screen.dart": {
+    "mtime": 1783362028.2990518,
+    "ast_hash": "309883a59fcb1177797cf9ca0a5b7504",
+    "semantic_hash": "309883a59fcb1177797cf9ca0a5b7504"
+  },
+  "screens/home_screen.dart": {
+    "mtime": 1783361549.8317392,
+    "ast_hash": "e6e02e6049ff6b5a9a857a2554f61d42",
+    "semantic_hash": "e6e02e6049ff6b5a9a857a2554f61d42"
+  },
+  "screens/leaves_screen.dart": {
+    "mtime": 1783361626.7747123,
+    "ast_hash": "354f77d139d85e469c0ceeb64953219c",
+    "semantic_hash": "354f77d139d85e469c0ceeb64953219c"
+  },
+  "screens/login_screen.dart": {
+    "mtime": 1782686961.003695,
+    "ast_hash": "8e94e11c448d7aec5ed9a96119ffdc6c",
+    "semantic_hash": "8e94e11c448d7aec5ed9a96119ffdc6c"
+  },
+  "screens/more_screen.dart": {
+    "mtime": 1783414688.0538018,
+    "ast_hash": "9024a7f31746f28612c147894bab5ecd",
+    "semantic_hash": "9024a7f31746f28612c147894bab5ecd"
+  },
+  "screens/notice_detail_screen.dart": {
+    "mtime": 1783362077.818735,
+    "ast_hash": "f110659914c2831304551a5dc636d310",
+    "semantic_hash": "f110659914c2831304551a5dc636d310"
+  },
+  "screens/noticeboard_screen.dart": {
+    "mtime": 1783362058.174661,
+    "ast_hash": "74e6db3eb699842319e05f0ff53f5487",
+    "semantic_hash": "74e6db3eb699842319e05f0ff53f5487"
+  },
+  "screens/overtime_screen.dart": {
+    "mtime": 1783362274.3940415,
+    "ast_hash": "a6c8d456406c32d1eb99ac5b244c460e",
+    "semantic_hash": "a6c8d456406c32d1eb99ac5b244c460e"
+  },
+  "screens/payroll_screen.dart": {
+    "mtime": 1783361545.4092565,
+    "ast_hash": "4c6cdf21a1710b12af0f5bf2256481dc",
+    "semantic_hash": "4c6cdf21a1710b12af0f5bf2256481dc"
+  },
+  "screens/profile_screen.dart": {
+    "mtime": 1783362308.074336,
+    "ast_hash": "35dfe5946433aca1799aabbe9c9ae484",
+    "semantic_hash": "35dfe5946433aca1799aabbe9c9ae484"
+  },
+  "screens/reports_screen.dart": {
+    "mtime": 1783362213.365579,
+    "ast_hash": "7e16d4e4523f591b322fd4bb5a383875",
+    "semantic_hash": "7e16d4e4523f591b322fd4bb5a383875"
+  },
+  "screens/rules_screen.dart": {
+    "mtime": 1783362042.2520897,
+    "ast_hash": "19a5828749378c900becf0f68b161ba1",
+    "semantic_hash": "19a5828749378c900becf0f68b161ba1"
+  },
+  "screens/tracking_screen.dart": {
+    "mtime": 1783362180.6090846,
+    "ast_hash": "88dfef4b056d91af385a0635d175349d",
+    "semantic_hash": "88dfef4b056d91af385a0635d175349d"
+  },
+  "services/api_service.dart": {
+    "mtime": 1783414541.2279692,
+    "ast_hash": "776a2d8141b9c9c5ddf3563b4d26dffa",
+    "semantic_hash": "776a2d8141b9c9c5ddf3563b4d26dffa"
+  },
+  "widgets/app_card.dart": {
+    "mtime": 1782686189.3043575,
+    "ast_hash": "cb4db5b1bf5c18e8f276a4bf65b5cd31",
+    "semantic_hash": "cb4db5b1bf5c18e8f276a4bf65b5cd31"
+  },
+  "widgets/stat_card.dart": {
+    "mtime": 1782687010.1320384,
+    "ast_hash": "d773eb1d937515da91a7754898f937de",
+    "semantic_hash": "d773eb1d937515da91a7754898f937de"
+  },
+  "widgets/status_badge.dart": {
+    "mtime": 1782738877.7824216,
+    "ast_hash": "03b49457dc3e6ffc54cefb574fea9024",
+    "semantic_hash": "03b49457dc3e6ffc54cefb574fea9024"
+  },
+  "screens/advance_salary_screen.dart": {
+    "mtime": 1783362158.782579,
+    "ast_hash": "e44dfc2f891d451deec52f66565f61c4",
+    "semantic_hash": "e44dfc2f891d451deec52f66565f61c4"
+  },
+  "screens/html_doc_screen.dart": {
+    "mtime": 1783362143.0764725,
+    "ast_hash": "a0c92552c26460dc006510c07acbc6f0",
+    "semantic_hash": "a0c92552c26460dc006510c07acbc6f0"
+  },
+  "theme/app_colors.dart": {
+    "mtime": 1782856338.3260736,
+    "ast_hash": "4d67fbef2d68e9ca387c30dde6e48028",
+    "semantic_hash": "4d67fbef2d68e9ca387c30dde6e48028"
+  },
+  "widgets/liquid_dial.dart": {
+    "mtime": 1783362771.7575665,
+    "ast_hash": "adeae5e58f7b3a0385be81bb8959d804",
+    "semantic_hash": "adeae5e58f7b3a0385be81bb8959d804"
+  },
+  "widgets/ui_kit.dart": {
+    "mtime": 1783362929.7706823,
+    "ast_hash": "f08919cef912e76fe3810bfd427fcae9",
+    "semantic_hash": "f08919cef912e76fe3810bfd427fcae9"
+  },
+  "screens/clients_screen.dart": {
+    "mtime": 1783414663.3627985,
+    "ast_hash": "935dd4aab01c05afa8689ba11f4e37c1",
+    "semantic_hash": "935dd4aab01c05afa8689ba11f4e37c1"
+  },
+  "screens/tasks_screen.dart": {
+    "mtime": 1783414613.307169,
+    "ast_hash": "96742eabc3c68f324344cf4f4d4db6fa",
+    "semantic_hash": "96742eabc3c68f324344cf4f4d4db6fa"
+  }
+}
