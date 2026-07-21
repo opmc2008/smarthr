@@ -3,11 +3,14 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
+import 'services/tracking_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
   final token = prefs.getString('smarthr_token') ?? '';
+  // Resume a tracking session the user never turned off (app killed, reboot...).
+  if (token.isNotEmpty) await TrackingService.instance.restore();
   runApp(SmartHRApp(isLoggedIn: token.isNotEmpty));
 }
 

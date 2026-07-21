@@ -1,0 +1,75 @@
+workflows:
+  ios-release:
+    name: SmartHR iOS Release
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      groups:
+        # Create this group in Codemagic > Teams/App settings > Environment variables.
+        # It must supply APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER,
+        # APP_STORE_CONNECT_PRIVATE_KEY and CERTIFICATE_PRIVATE_KEY.
+        - appstore_credentials
+      vars:
+        BUNDLE_ID: "com.smarthr.smarthrApp"
+        XCODE_SCHEME: "Runner"
+    scripts:
+      - name: Fetch signing files
+        script: |
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create
+      - name: Add certificates to keychain
+        script: |
+          keychain initialize
+          keychain add-certificates
+      - name: Set up code signing settings on Xcode project
+        script: xcode-project use-profiles
+      - name: Install dependencies
+        script: |
+          flutter pub get
+          find . -name "Podfile" -execdir pod install \;
+      - name: Static analysis
+        script: flutter analyze
+      - name: Build IPA
+        script: |
+          flutter build ipa --release \
+            --build-number=$(($PROJECT_BUILD_NUMBER + 1)) \
+            --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - flutter_drive.log
+    publishing:
+      email:
+        recipients:
+          - mahfuz.fancy.pigeon4@gmail.com
+        notify:
+          success: true
+          failure: true
+      # Uncomment once the app record exists in App Store Connect.
+      # app_store_connect:
+      #   auth: integration
+      #   submit_to_testflight: true
+
+  ios-unsigned-debug:
+    # Sanity workflow: proves the iOS build compiles without any Apple account.
+    # Produces a .app, NOT an installable .ipa.
+    name: SmartHR iOS Build Check (unsigned)
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Install dependencies
+        script: |
+          flutter pub get
+          find . -name "Podfile" -execdir pod install \;
+      - name: Build unsigned
+        script: flutter build ios --release --no-codesign
+    artifacts:
+      - build/ios/iphoneos/*.app
