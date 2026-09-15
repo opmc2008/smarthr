@@ -31,6 +31,7 @@ class AppColors {
   static const green = Color(0xFF178A4C);
   static const greenTint = Color(0xFFE3F9EC);
   static const violet = Color(0xFF7C3AED);
+  static const violetTint = Color(0xFFF1EAFE);
   static const red = Color(0xFFD63649);
   static const redTint = Color(0xFFFFE7E9);
 

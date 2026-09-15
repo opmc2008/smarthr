@@ -1,11 +1,14 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'api_service.dart';
+import 'tracking_engine.dart';
 
 /// Outcome of asking the OS for location access.
 enum TrackingPermission {
@@ -16,23 +19,26 @@ enum TrackingPermission {
   serviceDisabled,  // GPS master switch is off
 }
 
-/// Owns the location session for the whole app.
+/// The app's handle on the tracking session.
 ///
-/// Lives outside the widget tree so a session keeps running when the tracking
-/// screen is popped, when the app is backgrounded, and across app restarts.
+/// The recording itself happens in [TrackingEngine]. On Android that engine
+/// runs inside a separate background service, so it keeps going when the app
+/// is backgrounded, swiped away, or its UI is torn down; this class starts and
+/// stops it and mirrors its state for the screens. On iOS the engine runs
+/// in-process under the `location` background mode.
+///
 /// A session ends only when [stop] is called, i.e. when the user turns it off.
-class TrackingService extends ChangeNotifier {
+class TrackingService extends ChangeNotifier with WidgetsBindingObserver {
   TrackingService._();
   static final TrackingService instance = TrackingService._();
 
-  static const _kActive = 'tracking_active';
-  static const _kBatch = 'tracking_batch_id';
-  static const _kStart = 'tracking_started_ms';
-  static const _kDistance = 'tracking_distance_m';
-  static const _kPoints = 'tracking_points';
-  static const _kPending = 'tracking_pending';
+  static const _kBatteryAsked = 'tracking_battery_asked';
+  static const _channel = MethodChannel('smarthr/background');
 
-  StreamSubscription<Position>? _positionStream;
+  final _bg = FlutterBackgroundService();
+  TrackingEngine? _inProcess;
+  StreamSubscription<Map<String, dynamic>?>? _updates;
+  Future<void>? _setup;
   Timer? _ticker;
   Timer? _retryTimer;
   SharedPreferences? _prefs;
@@ -42,59 +48,66 @@ class TrackingService extends ChangeNotifier {
   final List<LatLng> _routePoints = [];
   double _distanceMeters = 0;
   DateTime? _startedAt;
-  String _batchId = '';
-  DateTime _lastSync = DateTime.fromMillisecondsSinceEpoch(0);
+  int _pendingCount = 0;
+  double _lastAccuracy = 0;
 
-  /// Points captured but not yet accepted by the server (offline buffer).
-  final List<LatLng> _pending = [];
+  static bool get _useService =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
   bool get isTracking => _isTracking;
   LatLng? get current => _current;
   List<LatLng> get routePoints => List.unmodifiable(_routePoints);
   double get distanceMeters => _distanceMeters;
-  int get pendingCount => _pending.length;
+  int get pendingCount => _pendingCount;
+
+  /// Accuracy of the most recent accepted fix, in metres — for the UI.
+  double get lastAccuracy => _lastAccuracy;
+
   Duration get elapsed =>
       _startedAt == null ? Duration.zero : DateTime.now().difference(_startedAt!);
 
   // ---------------------------------------------------------------- lifecycle
 
+  /// One-time wiring; runs lazily so a user who logs in mid-launch still gets it.
+  Future<void> _ensureSetup() => _setup ??= () async {
+        _prefs = await SharedPreferences.getInstance();
+        WidgetsBinding.instance.addObserver(this);
+        if (!_useService) return;
+        await _bg.configure(
+          androidConfiguration: AndroidConfiguration(
+            onStart: trackingServiceMain,
+            autoStart: false,
+            // Picks the session back up after a reboot; the engine stops
+            // itself straight away if the user had already turned it off.
+            autoStartOnBoot: true,
+            isForegroundMode: true,
+            foregroundServiceTypes: [AndroidForegroundType.location],
+            initialNotificationTitle: 'SmartHR tracking active',
+            initialNotificationContent:
+                'Recording your route for this work session.',
+            foregroundServiceNotificationId: 7401,
+          ),
+          // Unused: iOS runs the engine in-process instead.
+          iosConfiguration: IosConfiguration(autoStart: false),
+        );
+        _updates = _bg.on('update').listen(_onUpdate);
+      }();
+
   /// Call once from `main()`. Re-attaches to a session the user never stopped.
   Future<void> restore() async {
-    _prefs = await SharedPreferences.getInstance();
+    await _ensureSetup();
     final p = _prefs!;
-    _pending
-      ..clear()
-      ..addAll(_decodePoints(p.getString(_kPending) ?? ''));
+    await p.reload();
+    _pendingCount = TrackingKeys.decode(p.getString(TrackingKeys.pending)).length;
+    if (!(p.getBool(TrackingKeys.active) ?? false)) return;
 
-    if (!(p.getBool(_kActive) ?? false)) return;
-
-    _batchId = p.getString(_kBatch) ?? _newBatchId();
-    final startMs = p.getInt(_kStart) ?? DateTime.now().millisecondsSinceEpoch;
-    _startedAt = DateTime.fromMillisecondsSinceEpoch(startMs);
-    _distanceMeters = p.getDouble(_kDistance) ?? 0;
-    _routePoints
-      ..clear()
-      ..addAll(_decodePoints(p.getString(_kPoints) ?? ''));
-    if (_routePoints.isNotEmpty) _current = _routePoints.last;
-
-    // The user never turned it off, so resume — but only if the OS still lets
-    // us. If permission was revoked we keep the session flagged active and the
-    // screen will surface the problem instead of silently dropping it.
-    final perm = await Geolocator.checkPermission();
-    final serviceOn = await Geolocator.isLocationServiceEnabled();
-    if (!serviceOn ||
-        perm == LocationPermission.denied ||
-        perm == LocationPermission.deniedForever) {
-      _isTracking = true;
-      notifyListeners();
-      _scheduleRetry();
-      return;
-    }
-
+    _startedAt = DateTime.fromMillisecondsSinceEpoch(
+        p.getInt(TrackingKeys.start) ?? DateTime.now().millisecondsSinceEpoch);
+    _loadRoute(p);
     _isTracking = true;
     _startTicker();
-    _subscribe();
     notifyListeners();
+    await _ensureRunning();
   }
 
   /// Ask for everything a background session needs.
@@ -108,21 +121,53 @@ class TrackingService extends ChangeNotifier {
 
     var perm = await Geolocator.checkPermission();
     if (perm == LocationPermission.denied) {
-      perm = await Geolocator.requestPermission();
+      try {
+        perm = await Geolocator.requestPermission();
+      } catch (e) {
+        debugPrint('TrackingService: permission request failed: $e');
+        return TrackingPermission.denied;
+      }
     }
     if (perm == LocationPermission.denied) return TrackingPermission.denied;
     if (perm == LocationPermission.deniedForever) {
       return TrackingPermission.deniedForever;
     }
-    if (perm == LocationPermission.always) return TrackingPermission.grantedAlways;
 
-    // whileInUse: a second request escalates to the "Allow all the time" prompt
-    // on Android 11+/iOS. Declining is fine — the foreground service still
-    // keeps us alive — so we don't treat it as a failure.
-    final escalated = await Geolocator.requestPermission();
-    return escalated == LocationPermission.always
-        ? TrackingPermission.grantedAlways
-        : TrackingPermission.granted;
+    var result = TrackingPermission.grantedAlways;
+    if (perm != LocationPermission.always) {
+      // whileInUse: a second request escalates to the "Allow all the time"
+      // prompt on Android 11+/iOS. Declining is fine — the foreground service
+      // still keeps us alive — so we don't treat it as a failure.
+      try {
+        final escalated = await Geolocator.requestPermission();
+        result = escalated == LocationPermission.always
+            ? TrackingPermission.grantedAlways
+            : TrackingPermission.granted;
+      } catch (e) {
+        debugPrint('TrackingService: permission escalation failed: $e');
+        result = TrackingPermission.granted;
+      }
+    }
+
+    await _requestAndroidExtras();
+    return result;
+  }
+
+  /// Notification permission (so the ongoing notification is visible on
+  /// Android 13+) and a one-time battery-optimisation exemption, without which
+  /// many OEM builds kill background services within minutes.
+  Future<void> _requestAndroidExtras() async {
+    if (!_useService) return;
+    try {
+      await _channel.invokeMethod('requestNotificationPermission');
+      final p = _prefs ??= await SharedPreferences.getInstance();
+      if (!(p.getBool(_kBatteryAsked) ?? false)) {
+        await p.setBool(_kBatteryAsked, true);
+        await _channel.invokeMethod('requestIgnoreBatteryOptimizations');
+      }
+    } catch (e) {
+      debugPrint('TrackingService: background extras failed: $e');
+    }
   }
 
   /// One-off fix so the map has something to show before a session starts.
@@ -140,140 +185,137 @@ class TrackingService extends ChangeNotifier {
 
   Future<void> start() async {
     if (_isTracking) return;
-    _prefs ??= await SharedPreferences.getInstance();
+    await _ensureSetup();
+    final p = _prefs!;
 
     _isTracking = true;
     _routePoints.clear();
+    if (_current != null) _routePoints.add(_current!);
     _distanceMeters = 0;
+    _lastAccuracy = 0;
     _startedAt = DateTime.now();
-    _batchId = _newBatchId();
-    _lastSync = DateTime.fromMillisecondsSinceEpoch(0);
 
-    if (_current != null) {
-      _routePoints.add(_current!);
-      _queue(_current!);
-    }
+    // Hand the new session to the engine through prefs before starting it.
+    await p.setString(
+        TrackingKeys.batch, 'b${_startedAt!.millisecondsSinceEpoch}');
+    await p.setInt(TrackingKeys.start, _startedAt!.millisecondsSinceEpoch);
+    await p.setDouble(TrackingKeys.distance, 0);
+    await p.setString(TrackingKeys.points, TrackingKeys.encode(_routePoints));
+    await p.setBool(TrackingKeys.active, true);
 
-    await _persist();
     _startTicker();
-    _subscribe();
     notifyListeners();
-    unawaited(_flushPending());
+    await _ensureRunning();
   }
 
   /// The only way a session ends.
   Future<void> stop() async {
     if (!_isTracking) return;
     _isTracking = false;
-    await _positionStream?.cancel();
-    _positionStream = null;
     _ticker?.cancel();
     _ticker = null;
     _retryTimer?.cancel();
     _retryTimer = null;
 
-    _prefs ??= await SharedPreferences.getInstance();
-    await _prefs!.setBool(_kActive, false);
+    final p = _prefs ??= await SharedPreferences.getInstance();
+    await p.setBool(TrackingKeys.active, false);
+    if (_useService) {
+      _bg.invoke('stop');
+    } else {
+      await _inProcess?.stop();
+    }
     notifyListeners();
-    unawaited(_flushPending());
   }
 
-  // ------------------------------------------------------------------ stream
-
-  void _subscribe() {
-    _positionStream?.cancel();
-    _positionStream = Geolocator.getPositionStream(
-      locationSettings: _backgroundSettings(),
-    ).listen(
-      _onPosition,
-      onError: (Object e) {
-        debugPrint('TrackingService: stream error: $e');
-        // Never end the session on our own — retry until the user stops it.
-        _scheduleRetry();
-      },
-      cancelOnError: true,
-    );
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || !_isTracking) return;
+    // Catch up on fixes recorded while no UI was listening, and restart the
+    // service if the OS stopped it while we were away.
+    unawaited(() async {
+      final p = _prefs!;
+      await p.reload();
+      _loadRoute(p);
+      notifyListeners();
+      await _ensureRunning();
+    }());
   }
 
-  LocationSettings _backgroundSettings() {
-    if (defaultTargetPlatform == TargetPlatform.android) {
-      return AndroidSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 5,
-        intervalDuration: const Duration(seconds: 5),
-        // Promotes the location service to a foreground service: Android keeps
-        // delivering fixes with the app backgrounded or the screen off, and the
-        // user always sees an ongoing notification while we track them.
-        foregroundNotificationConfig: const ForegroundNotificationConfig(
-          notificationTitle: 'SmartHR tracking active',
-          notificationText: 'Recording your route for this work session.',
-          notificationIcon: AndroidResource(name: 'ic_launcher', defType: 'mipmap'),
-          enableWakeLock: true,
-          setOngoing: true,
-        ),
-      );
+  // ----------------------------------------------------------------- engine
+
+  /// Starts the engine if the OS allows it, otherwise keeps retrying.
+  Future<void> _ensureRunning() async {
+    if (!_isTracking) return;
+    final serviceOn = await Geolocator.isLocationServiceEnabled();
+    final perm = await Geolocator.checkPermission();
+    // If permission was revoked we keep the session flagged active and the
+    // screen surfaces the problem instead of silently dropping it.
+    if (!serviceOn ||
+        perm == LocationPermission.denied ||
+        perm == LocationPermission.deniedForever) {
+      _scheduleRetry();
+      return;
     }
-    if (defaultTargetPlatform == TargetPlatform.iOS ||
-        defaultTargetPlatform == TargetPlatform.macOS) {
-      return AppleSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 5,
-        activityType: ActivityType.otherNavigation,
-        pauseLocationUpdatesAutomatically: false,
-        showBackgroundLocationIndicator: true,
-        allowBackgroundLocationUpdates: true,
-      );
+
+    try {
+      if (_useService) {
+        if (await _bg.isRunning()) {
+          _bg.invoke('resume'); // no-op if it is already recording
+        } else {
+          await _bg.startService();
+        }
+      } else {
+        await (_inProcess ??= TrackingEngine(onUpdate: _onUpdate)).resume();
+      }
+    } catch (e) {
+      // Android 12+ refuses to start a foreground service from the background;
+      // the next retry or app resume will get it going.
+      debugPrint('TrackingService: could not start engine: $e');
+      _scheduleRetry();
     }
-    return const LocationSettings(
-      accuracy: LocationAccuracy.high,
-      distanceFilter: 5,
-    );
   }
 
   void _scheduleRetry() {
     if (!_isTracking) return;
     _retryTimer?.cancel();
-    _retryTimer = Timer(const Duration(seconds: 15), () async {
-      if (!_isTracking) return;
-      final serviceOn = await Geolocator.isLocationServiceEnabled();
-      final perm = await Geolocator.checkPermission();
-      if (serviceOn &&
-          (perm == LocationPermission.always ||
-              perm == LocationPermission.whileInUse)) {
-        _startTicker();
-        _subscribe();
-        notifyListeners();
-      } else {
-        _scheduleRetry();
-      }
-    });
+    _retryTimer = Timer(const Duration(seconds: 15), _ensureRunning);
   }
 
-  void _onPosition(Position position) {
-    final next = LatLng(position.latitude, position.longitude);
-    _current = next;
+  void _onUpdate(Map<String, dynamic>? e) {
+    if (e == null) return;
+    _pendingCount = (e['pending'] as num?)?.toInt() ?? _pendingCount;
 
-    if (_isTracking) {
-      if (_routePoints.isNotEmpty) {
-        final last = _routePoints.last;
-        _distanceMeters += Geolocator.distanceBetween(
-          last.latitude,
-          last.longitude,
-          next.latitude,
-          next.longitude,
-        );
+    final lat = (e['lat'] as num?)?.toDouble();
+    final lng = (e['lng'] as num?)?.toDouble();
+    if (lat != null && lng != null && _isTracking) {
+      _current = LatLng(lat, lng);
+      _lastAccuracy = (e['accuracy'] as num?)?.toDouble() ?? _lastAccuracy;
+      _distanceMeters = (e['distance'] as num?)?.toDouble() ?? _distanceMeters;
+      _routePoints.add(_current!);
+      if (_routePoints.length > TrackingKeys.maxStoredPoints) {
+        _routePoints.removeRange(
+            0, _routePoints.length - TrackingKeys.maxStoredPoints);
       }
-      _routePoints.add(next);
-
-      final now = DateTime.now();
-      if (now.difference(_lastSync).inSeconds > 10) {
-        _lastSync = now;
-        _queue(next);
-        unawaited(_flushPending());
+      // Out of step (missed events while detached): resync from disk.
+      final count = (e['count'] as num?)?.toInt();
+      if (count != null && count != _routePoints.length) {
+        unawaited(() async {
+          final p = _prefs!;
+          await p.reload();
+          _loadRoute(p);
+          notifyListeners();
+        }());
       }
-      unawaited(_persist());
     }
     notifyListeners();
+  }
+
+  void _loadRoute(SharedPreferences p) {
+    _distanceMeters = p.getDouble(TrackingKeys.distance) ?? 0;
+    _routePoints
+      ..clear()
+      ..addAll(TrackingKeys.decode(p.getString(TrackingKeys.points)));
+    if (_routePoints.isNotEmpty) _current = _routePoints.last;
   }
 
   void _startTicker() {
@@ -284,66 +326,10 @@ class TrackingService extends ChangeNotifier {
     });
   }
 
-  // ------------------------------------------------------------------ upload
-
-  void _queue(LatLng p) {
-    _pending.add(p);
-    // Bound the buffer so a long offline stretch can't grow without limit.
-    if (_pending.length > 500) _pending.removeRange(0, _pending.length - 500);
-  }
-
-  Future<void> _flushPending() async {
-    if (_pending.isEmpty) return;
-    while (_pending.isNotEmpty) {
-      final p = _pending.first;
-      try {
-        await ApiService.locationCreate(
-          _batchId,
-          p.latitude.toStringAsFixed(6),
-          p.longitude.toStringAsFixed(6),
-        );
-        _pending.removeAt(0);
-      } catch (e) {
-        debugPrint('TrackingService: sync failed, will retry: $e');
-        break; // keep the point buffered for the next flush
-      }
-    }
-    _prefs ??= await SharedPreferences.getInstance();
-    await _prefs!.setString(_kPending, _encodePoints(_pending));
-    notifyListeners();
-  }
-
-  // ----------------------------------------------------------- persistence
-
-  Future<void> _persist() async {
-    _prefs ??= await SharedPreferences.getInstance();
-    final p = _prefs!;
-    await p.setBool(_kActive, _isTracking);
-    await p.setString(_kBatch, _batchId);
-    await p.setInt(_kStart, _startedAt?.millisecondsSinceEpoch ?? 0);
-    await p.setDouble(_kDistance, _distanceMeters);
-    // Cap the stored polyline; the server holds the authoritative history.
-    final tail = _routePoints.length > 2000
-        ? _routePoints.sublist(_routePoints.length - 2000)
-        : _routePoints;
-    await p.setString(_kPoints, _encodePoints(tail));
-  }
-
-  String _newBatchId() => 'b${DateTime.now().millisecondsSinceEpoch}';
-
-  static String _encodePoints(List<LatLng> pts) =>
-      pts.map((p) => '${p.latitude},${p.longitude}').join(';');
-
-  static List<LatLng> _decodePoints(String raw) {
-    if (raw.isEmpty) return const [];
-    final out = <LatLng>[];
-    for (final chunk in raw.split(';')) {
-      final parts = chunk.split(',');
-      if (parts.length != 2) continue;
-      final lat = double.tryParse(parts[0]);
-      final lon = double.tryParse(parts[1]);
-      if (lat != null && lon != null) out.add(LatLng(lat, lon));
-    }
-    return out;
+  @override
+  void dispose() {
+    _updates?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 }

@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
+import '../services/tracking_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/liquid_dial.dart';
 import '../widgets/ui_kit.dart';
@@ -21,14 +23,41 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   Map<String, dynamic> _info = {};
+  /// Every shift the website assigned for today (schedule1..3), in order.
+  List<Map<String, dynamic>> _shifts = [];
+  /// The shift the user picked to clock into — defaults to the first.
   Map<String, dynamic> _schedule = {};
   bool _loading = true;
   bool _clockedIn = false;
-  int _leaveRemaining = 0;
+  /// What /today-schedule actually returned, when no shift could be parsed —
+  /// surfaced in the error toast so the cause is visible without a debug build.
+  String _scheduleDebug = '';
+
+  /// Set when /today-schedule itself failed (e.g. the endpoint 500s), as
+  /// opposed to succeeding with no shifts. The two need different messages:
+  /// one is an outage, the other is an HR/assignment question.
+  String _schedError = '';
+
+  int _lateInDays = 0;
+  int _earlyOutDays = 0;
+  int _leaveRemaining = 0; // still shown in Recent activity
   int _otMinutes = 0;
+
+  /// Set once the user clocks out — one check-in/check-out pair per day, so the
+  /// button stays locked until tomorrow. Extra hours go through an OT application.
+  bool _shiftDoneToday = false;
 
   Timer? _clock;
   DateTime? _localStartTime;
+
+  /// True when the picker is showing the cached list because the schedule
+  /// endpoint failed — the sheet says so rather than passing it off as today's.
+  bool _shiftsAreStale = false;
+
+  static const _kDoneDate = 'shift_done_date';
+  static const _kShiftCache = 'shift_cache';
+  static String _dayKey(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
   @override
   void initState() {
@@ -44,8 +73,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     try {
       final results = await Future.wait([
         ApiService.myInfo(),
-        ApiService.todaySchedule().catchError((_) => <String, dynamic>{}),
+        ApiService.todaySchedule().catchError((e) {
+          _schedError = e.toString().replaceAll('Exception: ', '');
+          return <String, dynamic>{};
+        }),
         ApiService.otBalance().catchError((_) => <String, dynamic>{}),
+        ApiService.attendanceList().catchError((_) => <String, dynamic>{}),
       ]);
       final info   = (results[0]['data'] ?? results[0]) as Map;
       final otData = results[2]['data'] ?? results[2];
@@ -61,33 +94,199 @@ class _DashboardScreenState extends State<DashboardScreen> {
         otMins += int.tryParse((o as Map)['total_overtime']?.toString() ?? '0') ?? 0;
       }
 
+      // Late In / Early Out day counts — same flags the website's attendance
+      // table summarises ("1"/"0" strings per attendance row).
+      final attList = (results[3]['data'] ?? results[3] ?? []) as List;
+      int lateIn = 0, earlyOut = 0;
+      for (final a in attList) {
+        if (a is! Map) continue;
+        if (a['is_late_in']?.toString() == '1') lateIn++;
+        if (a['is_early_out']?.toString() == '1') earlyOut++;
+      }
+
       final schedData = (results[1]['data'] ?? results[1] ?? {}) as Map;
-      final schedules = (schedData['schedules'] ?? {}) as Map;
+      final schedulesRaw = schedData['schedules'] ?? schedData['schedule'] ?? {};
       final shifts = <Map<String, dynamic>>[];
-      for (final key in ['schedule1', 'schedule2', 'schedule3']) {
-        final s = schedules[key];
-        if (s is Map && (s['start_time']?.toString() ?? '').isNotEmpty) {
-          shifts.add(Map<String, dynamic>.from(s));
+
+      // The server has used more than one spelling for these over time, so read
+      // the first key that carries a value rather than assuming one name.
+      String pick(Map m, List<String> keys) {
+        for (final k in keys) {
+          final v = m[k]?.toString() ?? '';
+          if (v.isNotEmpty && v != 'null') return v;
         }
+        return '';
+      }
+
+      void addShift(dynamic s) {
+        if (s is! Map) return;
+        final start = pick(s, ['start_time', 'start', 'in_time', 'office_start_time']);
+        final end   = pick(s, ['end_time', 'end', 'out_time', 'office_end_time']);
+        final label = pick(s, ['office_shifts', 'office_shift', 'shift_name', 'name', 'title']);
+        // Keep a shift if it carries *anything* identifying — a missing end time
+        // shouldn't hide an otherwise valid shift from the picker.
+        if (start.isEmpty && end.isEmpty && label.isEmpty) return;
+        shifts.add({
+          ...Map<String, dynamic>.from(s),
+          'start_time': start,
+          'end_time': end,
+          'office_shifts': label.isEmpty ? 'Shift ${shifts.length + 1}' : label,
+          'total_office_hour': pick(s, ['total_office_hour', 'office_hour', 'total_hour']),
+          'late_in_consider_time': pick(s, ['late_in_consider_time', 'late_in']),
+          'early_out_consider_time': pick(s, ['early_out_consider_time', 'early_out']),
+        });
+      }
+
+      if (schedulesRaw is Map) {
+        for (final key in ['schedule1', 'schedule2', 'schedule3']) {
+          addShift(schedulesRaw[key]);
+        }
+        // Fall back to whatever keys the server actually used, so a rename
+        // server-side doesn't silently leave the picker empty.
+        if (shifts.isEmpty) schedulesRaw.values.forEach(addShift);
+      } else if (schedulesRaw is List) {
+        schedulesRaw.forEach(addShift);
+      }
+
+      // If nothing parsed, keep a short description of what did arrive so the
+      // failure toast can say why instead of just "none".
+      if (shifts.isEmpty) {
+        final outer = schedData.keys.join(', ');
+        final inner = schedulesRaw is Map
+            ? schedulesRaw.keys.join(', ')
+            : (schedulesRaw is List ? '${schedulesRaw.length} items' : schedulesRaw.runtimeType.toString());
+        _scheduleDebug = 'keys: [$outer] schedules: [$inner]';
+        _shiftsAreStale = false;
+      } else {
+        _scheduleDebug = '';
       }
       final alreadyIn = schedData['is_login_today']?.toString() == 'yes';
 
       final prefs = await SharedPreferences.getInstance();
+
+      // Keep the last good shift list. /today-schedule is known to 500 on some
+      // days (server bug), and without this the picker would be empty and
+      // clock-in impossible even though /time_in itself is healthy.
+      if (shifts.isNotEmpty) {
+        await prefs.setString(_kShiftCache, jsonEncode(shifts));
+        _shiftsAreStale = false;
+      } else {
+        final cached = prefs.getString(_kShiftCache) ?? '';
+        if (cached.isNotEmpty) {
+          try {
+            for (final s in jsonDecode(cached) as List) {
+              shifts.add(Map<String, dynamic>.from(s as Map));
+            }
+            _shiftsAreStale = shifts.isNotEmpty;
+          } catch (_) {/* corrupt cache — fall through to the empty-state toast */}
+        }
+      }
+
       final localStartStr = prefs.getString('shift_start_time');
       if (localStartStr != null) {
         _localStartTime = DateTime.tryParse(localStartStr);
       }
+      // Only today's stamp counts — the lock lifts on its own at midnight.
+      final doneToday = prefs.getString(_kDoneDate) == _dayKey(DateTime.now());
 
       setState(() {
         _info = Map<String, dynamic>.from(info);
+        _shifts = shifts;
         _schedule = shifts.isNotEmpty ? shifts.first : {};
-        _clockedIn = alreadyIn || _localStartTime != null;
+        _shiftDoneToday = doneToday;
+        _clockedIn = !doneToday && (alreadyIn || _localStartTime != null);
+        _lateInDays = lateIn;
+        _earlyOutDays = earlyOut;
         _leaveRemaining = leaveRem.toInt();
         _otMinutes = otMins;
         _loading = false;
       });
-    } catch (_) { setState(() => _loading = false); }
+    } catch (e) {
+      // An expired token otherwise leaves the user staring at a dashboard of
+      // zeros with no hint that signing in again is all that's needed.
+      if (ApiService.isSessionExpired(e)) {
+        await _forceRelogin();
+        return;
+      }
+      setState(() => _loading = false);
+    }
   }
+
+  /// Clock-in entry point. With more than one shift assigned the user picks
+  /// which one first — the API needs that shift's times, not always shift 1.
+  Future<void> _startClockIn() async {
+    if (_shiftDoneToday) {
+      _toast('You already checked out today. Use the Overtime section for extra hours.', error: true);
+      return;
+    }
+    if (_shifts.isEmpty) {
+      final expired = ApiService.isSessionExpired(_schedError);
+      _toast(
+        expired
+            ? _schedError // "Your session has expired. Please log in again."
+            : _schedError.isNotEmpty
+                ? 'Shift schedule unavailable — $_schedError. This is a server fault, not your account.'
+                : 'No shift is assigned for today${_scheduleDebug.isEmpty ? '' : ' — $_scheduleDebug'}',
+        error: true,
+      );
+      return;
+    }
+    // Always ask which shift — the user picks, even when only one is assigned.
+    final picked = await _pickShift();
+    if (picked == null) return;
+    setState(() => _schedule = picked);
+    await _clockIn();
+  }
+
+  Future<Map<String, dynamic>?> _pickShift() => showModalBottomSheet<Map<String, dynamic>>(
+        context: context,
+        backgroundColor: Colors.white,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(22))),
+        builder: (ctx) => SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const SizedBox(height: 14),
+            Container(width: 38, height: 4, decoration: BoxDecoration(color: AppColors.blueTint, borderRadius: BorderRadius.circular(2))),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(18, 16, 18, 4),
+              child: Align(alignment: Alignment.centerLeft, child: SectionTitle('Select your shift')),
+            ),
+            if (_shiftsAreStale)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(18, 0, 18, 6),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    "Schedule service is down — showing your last known shifts.",
+                    style: TextStyle(fontSize: 11, color: AppColors.red, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+            ..._shifts.map((s) {
+              final label = s['office_shifts']?.toString() ?? '';
+              final start = s['start_time']?.toString() ?? '';
+              final end = s['end_time']?.toString() ?? '';
+              final selected = identical(s, _schedule);
+              return SoftCard(
+                margin: const EdgeInsets.fromLTRB(14, 6, 14, 0),
+                onTap: () => Navigator.pop(ctx, s),
+                child: Row(children: [
+                  Icon(selected ? Icons.radio_button_checked : Icons.radio_button_off,
+                      size: 18, color: selected ? AppColors.blue : AppColors.blueTint),
+                  const SizedBox(width: 12),
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(label.isEmpty ? 'Shift' : label,
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+                    Text('$start – $end', style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                  ])),
+                  if ((s['total_office_hour']?.toString() ?? '').isNotEmpty)
+                    SoftPill('${s['total_office_hour']}h', AppColors.blue),
+                ]),
+              );
+            }),
+            const SizedBox(height: 16),
+          ]),
+        ),
+      );
 
   Future<void> _clockIn() async {
     try {
@@ -119,12 +318,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
       
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove('shift_start_time');
-      
+      // Closes the day: no second check-in until tomorrow.
+      await prefs.setString(_kDoneDate, _dayKey(DateTime.now()));
+
       setState(() {
         _clockedIn = false;
         _localStartTime = null;
+        _shiftDoneToday = true;
       });
-      if (mounted) _toast('Clocked out');
+      if (mounted) _toast('Clocked out. Shift closed for today.');
     } catch (e) { if (mounted) _toast(e.toString().replaceAll('Exception: ', ''), error: true); }
   }
 
@@ -133,7 +335,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
         behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ));
 
+  /// Drops the dead session and returns to login, explaining why.
+  Future<void> _forceRelogin() async {
+    await ApiService.clearAll();
+    if (!mounted) return;
+    setState(() => _loading = false);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('Your session has expired. Please log in again.'),
+      backgroundColor: AppColors.red,
+      behavior: SnackBarBehavior.floating,
+    ));
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+      (_) => false,
+    );
+  }
+
   Future<void> _logout() async {
+    // End tracking while the token is still valid for the final upload.
+    await TrackingService.instance.stop();
     try { await ApiService.logout(); } catch (_) {}
     await ApiService.clearAll();
     if (mounted) Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const LoginScreen()), (_) => false);
@@ -191,7 +411,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     final name = (_info['name'] ?? 'Employee').toString().split(' ').first;
-    final salary = _info['salary']?.toString() ?? '—';
     final pct = (_shiftProgress * 100).round();
 
     return Scaffold(
@@ -215,7 +434,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ),
                       padding: const EdgeInsets.fromLTRB(14, 18, 14, 30),
                       child: Column(children: [
-                        _statChips(salary),
+                        _statChips(),
                         const SizedBox(height: 18),
                         _sectionRow('Quick actions'),
                         const SizedBox(height: 10),
@@ -345,32 +564,37 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
 
   Widget _clockBtn() {
+    // Three states: clock in → clock out → checked out (inert until midnight;
+    // extra hours are applied for from the Overtime section, not from here).
+    final done = _shiftDoneToday && !_clockedIn;
     final inMode = !_clockedIn;
+    final color = done ? AppColors.inkSoft : AppColors.orange;
     return GestureDetector(
-      onTap: inMode ? _clockIn : _clockOut,
+      onTap: done ? null : (inMode ? _startClockIn : _clockOut),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
         decoration: BoxDecoration(
-          color: AppColors.orange,
+          color: color,
           borderRadius: BorderRadius.circular(13),
-          boxShadow: [BoxShadow(color: AppColors.orange.withValues(alpha: 0.4), blurRadius: 18, offset: const Offset(0, 6))],
+          boxShadow: [BoxShadow(color: color.withValues(alpha: 0.4), blurRadius: 18, offset: const Offset(0, 6))],
         ),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(inMode ? Icons.fingerprint : Icons.logout, color: Colors.white, size: 16),
+          Icon(done ? Icons.check_circle_outline : (inMode ? Icons.fingerprint : Icons.logout), color: Colors.white, size: 16),
           const SizedBox(width: 7),
-          Text(inMode ? 'Clock in' : 'Clock out', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13)),
+          Text(done ? 'Checked out' : (inMode ? 'Clock in' : 'Clock out'),
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13)),
         ]),
       ),
     );
   }
 
   // ── Content sheet pieces ────────────────────────────────────────────────
-  Widget _statChips(String salary) => Row(children: [
-        Expanded(child: _chip(Icons.calendar_month, AppColors.blue, AppColors.blueTint, '$_leaveRemaining', 'Leave left', (_leaveRemaining / 15).clamp(0.05, 1.0))),
+  Widget _statChips() => Row(children: [
+        Expanded(child: _chip(Icons.schedule, AppColors.red, AppColors.redTint, '$_lateInDays', 'Late in', (_lateInDays / 10).clamp(0.05, 1.0))),
         const SizedBox(width: 9),
         Expanded(child: _chip(Icons.hourglass_top, AppColors.orange, AppColors.orangeTint, '$_otMinutes', 'OT mins', (_otMinutes / 600).clamp(0.05, 1.0))),
         const SizedBox(width: 9),
-        Expanded(child: _chip(Icons.payments, AppColors.green, AppColors.greenTint, '৳$salary', 'Salary', 1.0)),
+        Expanded(child: _chip(Icons.run_circle_outlined, AppColors.violet, AppColors.violetTint, '$_earlyOutDays', 'Early out', (_earlyOutDays / 10).clamp(0.05, 1.0))),
       ]);
 
   Widget _chip(IconData icon, Color c, Color tint, String value, String label, double frac) => _card(

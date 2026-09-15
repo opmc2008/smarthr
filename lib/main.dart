@@ -5,6 +5,11 @@ import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 import 'services/tracking_service.dart';
 
+// Popup palette — kept local so main.dart stays free of theme imports.
+const _ink = Color(0xFF0F1B33);
+const _inkMuted = Color(0xFF6B7C99);
+const _brandBlue = Color(0xFF1B5CFF);
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
@@ -53,6 +58,39 @@ class SmartHRApp extends StatelessWidget {
             if (states.contains(WidgetState.selected)) return const TextStyle(color: Color(0xFFFF7A1A), fontWeight: FontWeight.w700, fontSize: 11);
             return const TextStyle(color: Color(0xFF8FA6DE), fontSize: 11);
           }),
+        ),
+        // The app shell is deliberately dark (transparent scaffolds over the
+        // ambient blue), but Material's own popups inherit that scheme and come
+        // out near-black. Force the pickers/dialogs light so the OT and
+        // Late In / Early Out forms match the white sheets they open from.
+        dialogTheme: const DialogThemeData(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.transparent,
+          titleTextStyle: TextStyle(color: _ink, fontSize: 16, fontWeight: FontWeight.w700, fontFamily: 'Inter'),
+          contentTextStyle: TextStyle(color: _ink, fontSize: 14, fontFamily: 'Inter'),
+        ),
+        timePickerTheme: TimePickerThemeData(
+          backgroundColor: Colors.white,
+          hourMinuteColor: const Color(0xFFEEF3FF),
+          hourMinuteTextColor: _ink,
+          dayPeriodColor: const Color(0xFFEEF3FF),
+          dayPeriodTextColor: _ink,
+          dialBackgroundColor: const Color(0xFFEEF3FF),
+          dialHandColor: _brandBlue,
+          dialTextColor: _ink,
+          entryModeIconColor: _brandBlue,
+          helpTextStyle: const TextStyle(color: _inkMuted, fontSize: 12, fontWeight: FontWeight.w700),
+          dayPeriodBorderSide: const BorderSide(color: Color(0xFFE0E7F5)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        ),
+        datePickerTheme: DatePickerThemeData(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.transparent,
+          headerBackgroundColor: _brandBlue,
+          headerForegroundColor: Colors.white,
+          dayForegroundColor: const WidgetStatePropertyAll(_ink),
+          weekdayStyle: const TextStyle(color: _inkMuted, fontWeight: FontWeight.w700),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         ),
       ),
       builder: (context, child) => Stack(children: [

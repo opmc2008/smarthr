@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Smarthr App</string>
+	<string>SmartHR</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -32,6 +32,11 @@
 	<string>SmartHR keeps recording your route in the background until you stop the tracking session.</string>
 	<key>NSLocationAlwaysUsageDescription</key>
 	<string>SmartHR keeps recording your route in the background until you stop the tracking session.</string>
+	<!-- Registered by flutter_background_service at launch; iOS asserts it is listed. -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>dev.flutter.background.refresh</string>
+	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../theme/app_colors.dart';
 import '../widgets/ui_kit.dart';
 import '../services/api_service.dart';
+import '../services/tracking_service.dart';
 import 'profile_screen.dart';
 import 'overtime_screen.dart';
 import 'tracking_screen.dart';
@@ -65,6 +66,8 @@ class MoreScreen extends StatelessWidget {
             label: const Text('Log Out', style: TextStyle(color: AppColors.red)),
             style: OutlinedButton.styleFrom(side: const BorderSide(color: Color(0x33DC2626)), padding: const EdgeInsets.symmetric(vertical: 14), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
             onPressed: () async {
+              // End tracking while the token is still valid for the final upload.
+              await TrackingService.instance.stop();
               try { await ApiService.logout(); } catch (_) {}
               await ApiService.clearAll();
               if (context.mounted) Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const LoginScreen()), (_) => false);

@@ -73,3 +73,35 @@ workflows:
         script: flutter build ios --release --no-codesign
     artifacts:
       - build/ios/iphoneos/*.app
+
+  ios-unsigned-ipa:
+    # No Apple Developer account needed. Produces an unsigned .ipa that
+    # Sideloadly/AltStore sign with a free Apple ID (app expires every 7 days).
+    name: SmartHR iOS Unsigned IPA (sideload)
+    instance_type: mac_mini_m2
+    max_build_duration: 45
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Install dependencies
+        script: |
+          flutter pub get
+          find . -name "Podfile" -execdir pod install \;
+      - name: Build unsigned app
+        script: flutter build ios --release --no-codesign
+      - name: Package as .ipa
+        script: |
+          mkdir -p build/ios/unsigned/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ios/unsigned/Payload/
+          cd build/ios/unsigned && zip -qry SmartHR-unsigned.ipa Payload
+    artifacts:
+      - build/ios/unsigned/*.ipa
+    publishing:
+      email:
+        recipients:
+          - mahfuz.fancy.pigeon4@gmail.com
+        notify:
+          success: true
+          failure: true

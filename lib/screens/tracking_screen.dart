@@ -1,6 +1,9 @@
+import 'package:flutter/foundation.dart' show Factory;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
+import '../services/api_service.dart';
 import '../services/tracking_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/ui_kit.dart';
@@ -14,9 +17,17 @@ class TrackingScreen extends StatefulWidget {
 class _TrackingScreenState extends State<TrackingScreen> {
   final _service = TrackingService.instance;
   GoogleMapController? _mapController;
+  /// Where the camera was last pointed, so it only re-centres on real movement.
+  LatLng? _lastCamTarget;
   MapType _mapType = MapType.normal;
   bool _isLoading = true;
   bool _busy = false;
+
+  /// Route as the *server* recorded it today, loaded on demand. Useful when the
+  /// phone has been restarted mid-day: the local route only holds this session.
+  List<LatLng> _history = [];
+  bool _historyLoading = false;
+  bool _historyShown = false;
 
   @override
   void initState() {
@@ -38,7 +49,71 @@ class _TrackingScreenState extends State<TrackingScreen> {
     setState(() {});
     final pos = _service.current;
     if (_service.isTracking && pos != null && _mapController != null) {
-      _mapController!.animateCamera(CameraUpdate.newLatLng(pos));
+      // Only chase the marker once it has actually moved. Re-centring on every
+      // fix makes the map twitch while standing still, which reads as bad GPS
+      // even when the filter is holding position steady.
+      final last = _lastCamTarget;
+      final moved = last == null
+          ? double.infinity
+          : Geolocator.distanceBetween(
+              last.latitude, last.longitude, pos.latitude, pos.longitude);
+      if (moved >= 8) {
+        _lastCamTarget = pos;
+        _mapController!.animateCamera(CameraUpdate.newLatLng(pos));
+      }
+    }
+  }
+
+  /// Pulls today's recorded points from the server and shows them as a second,
+  /// faded trail. Toggling off keeps them cached so a re-show costs nothing.
+  Future<void> _toggleHistory() async {
+    if (_historyShown) {
+      setState(() => _historyShown = false);
+      return;
+    }
+    if (_history.isNotEmpty) {
+      setState(() => _historyShown = true);
+      return;
+    }
+    setState(() => _historyLoading = true);
+    try {
+      // The user id isn't always stored at login, so fall back to /my_info and
+      // cache it for next time.
+      var uid = await ApiService.getUserId();
+      if (uid.isEmpty) {
+        final info = await ApiService.myInfo();
+        final data = (info['data'] ?? info) as Map;
+        uid = (data['user_id'] ?? data['id'] ?? '').toString();
+        if (uid.isNotEmpty) await ApiService.setUserId(uid);
+      }
+      if (uid.isEmpty) throw Exception('Could not determine your user id.');
+
+      final today = DateTime.now();
+      final d = '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+      final res = await ApiService.locationHistory(uid, start: d, end: d);
+
+      final raw = (res['data'] ?? res['locations'] ?? []) ;
+      final list = raw is List ? raw : (raw is Map ? (raw.values.firstWhere((v) => v is List, orElse: () => const [])) : const []);
+      final pts = <LatLng>[];
+      for (final item in (list as List)) {
+        if (item is! Map) continue;
+        // Field names for these are unconfirmed against the live server, so
+        // accept the spellings the API has plausibly used.
+        final lat = double.tryParse((item['lat'] ?? item['latitude'] ?? '').toString());
+        final lng = double.tryParse((item['lon'] ?? item['lng'] ?? item['long'] ?? item['longitude'] ?? '').toString());
+        if (lat != null && lng != null) pts.add(LatLng(lat, lng));
+      }
+      if (!mounted) return;
+      setState(() {
+        _history = pts;
+        _historyShown = true;
+        _historyLoading = false;
+      });
+      if (pts.isEmpty) _snack('No recorded points found for today.');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _historyLoading = false);
+      _snack(e.toString().replaceAll('Exception: ', ''));
     }
   }
 
@@ -168,6 +243,17 @@ class _TrackingScreenState extends State<TrackingScreen> {
             ]),
             const SizedBox(height: 4),
             Text(tracking ? 'Active Route' : 'Idle', style: TextStyle(fontWeight: FontWeight.w700, color: tracking ? AppColors.green : AppColors.inkSoft)),
+            if (_service.lastAccuracy > 0) ...[
+              const SizedBox(height: 2),
+              // Surfacing the fix radius makes "the map is wrong" diagnosable:
+              // a 25m reading is the GPS, not the app.
+              Text('±${_service.lastAccuracy.toStringAsFixed(0)} m GPS',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: _service.lastAccuracy <= 10 ? AppColors.green : AppColors.orange,
+                    fontWeight: FontWeight.w600,
+                  )),
+            ],
           ]))),
           const SizedBox(width: 12),
           Expanded(child: SoftCard(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -207,20 +293,75 @@ class _TrackingScreenState extends State<TrackingScreen> {
                       GoogleMap(
                         initialCameraPosition: CameraPosition(target: position, zoom: 16.0),
                         onMapCreated: (controller) => _mapController = controller,
+                        // The map lives inside a scrolling sheet, which would
+                        // otherwise win every vertical drag in the gesture
+                        // arena — leaving the map unable to pan or zoom.
+                        gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+                          Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
+                        },
                         myLocationEnabled: true,
                         myLocationButtonEnabled: true,
                         zoomControlsEnabled: true,
                         compassEnabled: true,
                         mapType: _mapType,
                         polylines: {
+                          if (_historyShown && _history.length > 1)
+                            Polyline(
+                              polylineId: const PolylineId('history'),
+                              points: _history,
+                              color: AppColors.blue.withValues(alpha: 0.55),
+                              width: 4,
+                              jointType: JointType.round,
+                            ),
                           if (routePoints.isNotEmpty)
                             Polyline(
                               polylineId: const PolylineId('route'),
                               points: routePoints,
                               color: AppColors.orange,
                               width: 5,
+                              startCap: Cap.roundCap,
+                              endCap: Cap.roundCap,
+                              jointType: JointType.round,
                             ),
                         },
+                        // Shows how confident the fix is, the way Maps does —
+                        // a wide circle means the GPS is unsure, not that the
+                        // app placed you wrongly.
+                        circles: {
+                          if (_service.lastAccuracy > 0)
+                            Circle(
+                              circleId: const CircleId('accuracy'),
+                              center: position,
+                              radius: _service.lastAccuracy,
+                              fillColor: AppColors.blue.withValues(alpha: 0.12),
+                              strokeColor: AppColors.blue.withValues(alpha: 0.35),
+                              strokeWidth: 1,
+                            ),
+                        },
+                        markers: {
+                          if (routePoints.isNotEmpty)
+                            Marker(
+                              markerId: const MarkerId('start'),
+                              position: routePoints.first,
+                              icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
+                              infoWindow: const InfoWindow(title: 'Session start'),
+                            ),
+                        },
+                      ),
+                      Positioned(
+                        top: 12,
+                        left: 62,
+                        child: FloatingActionButton.small(
+                          heroTag: 'historyToggle',
+                          backgroundColor: _historyShown ? AppColors.blue : Colors.white,
+                          onPressed: _historyLoading ? null : _toggleHistory,
+                          child: _historyLoading
+                              ? const SizedBox(
+                                  width: 16, height: 16,
+                                  child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.blue))
+                              : Icon(Icons.timeline,
+                                  color: _historyShown ? Colors.white : AppColors.ink),
+                        ),
                       ),
                       Positioned(
                         top: 12,

@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart' show Factory;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../services/api_service.dart';
@@ -152,6 +154,11 @@ class _AdminEmployeeTrackingScreenState extends State<AdminEmployeeTrackingScree
                   GoogleMap(
                     initialCameraPosition: CameraPosition(target: _currentPosition!, zoom: 16.0),
                     onMapCreated: (controller) => _mapController = controller,
+                    // Same gesture-arena fix as the employee map: without this
+                    // the surrounding scroll view eats every pan and pinch.
+                    gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+                      Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
+                    },
                     myLocationEnabled: false,
                     myLocationButtonEnabled: false,
                     zoomControlsEnabled: true,

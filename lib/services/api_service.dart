@@ -3,6 +3,12 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
+  /// Marker message for an expired/invalid session, so callers can tell it
+  /// apart from a genuine server fault without string-matching a stack trace.
+  static const String _sessionExpired = 'Your session has expired. Please log in again.';
+  static bool isSessionExpired(Object? e) =>
+      e != null && e.toString().contains(_sessionExpired);
+
   static const String host = 'https://smarthrm.gpstrackerbd.com';
   static const String _baseUrl = '$host/api/mobile/v1';
 
@@ -79,7 +85,22 @@ class ApiService {
       res = await http.get(uri, headers: headers).timeout(const Duration(seconds: 15));
     }
 
-    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    // Non-JSON bodies mean one of two very different things, and telling the
+    // user the wrong one sends them to the wrong person for help:
+    //   - a login redirect  -> their session expired, they just need to sign in
+    //   - a Laravel error   -> the endpoint itself is broken, IT's problem
+    late final Map<String, dynamic> data;
+    try {
+      data = jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (_) {
+      final body = res.body;
+      final looksLikeLogin = body.contains('/login') ||
+          body.contains('Redirecting to') ||
+          res.statusCode == 401 ||
+          res.statusCode == 419;
+      if (looksLikeLogin) throw Exception(_sessionExpired);
+      throw Exception('Server error ${res.statusCode} on $path (not JSON)');
+    }
     if (res.statusCode >= 400) {
       final msg = data['message'] ?? data['error'] ?? 'Server error ${res.statusCode}';
       throw Exception(msg.toString());
